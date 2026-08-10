@@ -1,0 +1,21 @@
+[Unit]
+Description=Jellyfin Media Auditor worker and webhook
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/foxfinauto
+EnvironmentFile=-/opt/foxfinauto/.env
+EnvironmentFile=-/etc/jellyfin-media-auditor/env
+Environment=AUDITOR_CONFIG=/opt/foxfinauto/config.yaml
+Environment=PYTHONPATH=/opt/foxfinauto
+ExecStart=/opt/foxfinauto/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8787
+Restart=always
+RestartSec=10
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

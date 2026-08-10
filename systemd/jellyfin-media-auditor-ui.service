@@ -1,0 +1,20 @@
+[Unit]
+Description=Jellyfin Media Auditor UI
+After=network-online.target jellyfin-media-auditor.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/foxfinauto
+EnvironmentFile=-/opt/foxfinauto/.env
+EnvironmentFile=-/etc/jellyfin-media-auditor/env
+Environment=AUDITOR_CONFIG=/opt/foxfinauto/config.yaml
+Environment=PYTHONPATH=/opt/foxfinauto
+ExecStart=/opt/foxfinauto/.venv/bin/streamlit run ui/dashboard.py --server.address 0.0.0.0 --server.port 8501
+Restart=always
+RestartSec=10
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

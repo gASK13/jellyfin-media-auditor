@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.streamlit/
+data/
+config.yaml
+.env
+*.db
+*.sqlite*
+PLAN.md
+AGENT.md
+SPEC.md
+

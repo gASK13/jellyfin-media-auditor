@@ -1,0 +1,36 @@
+jellyfin:
+  url: "http://jellyfin:8096"
+  api_key: "${JELLYFIN_API_KEY}"
+  # Needed by some Jellyfin versions for item-detail requests. Obtain from GET /Users.
+  user_id: ""
+  webhook_token: "${JELLYFIN_WEBHOOK_TOKEN}"
+media:
+  jellyfin_root: "/media/movies"
+  worker_root: "/mnt/movies"
+libraries:
+  - name: "Movies"
+    jellyfin_id: "replace-with-jellyfin-library-id"
+opensubtitles:
+  api_key: "${OPENSUBTITLES_API_KEY}"
+  username: "${OPENSUBTITLES_USERNAME}"
+  password: "${OPENSUBTITLES_PASSWORD}"
+whisper:
+  model: "base"
+  device: "cpu"
+  compute_type: "int8"
+scanner:
+  interval_minutes: 60
+  worker_poll_seconds: 5
+  max_attempts: 5
+audio_detection:
+  confidence_threshold: 0.75
+  initial_sample_count: 3
+  fallback_sample_count: 6
+  sample_duration_seconds: 30
+subtitles:
+  enabled: false
+  czech_language: "cs"
+  english_language: "en"
+  not_found_retry_hours: 168
+  max_downloads_per_day: 100
+  quota_retry_hours: 24
