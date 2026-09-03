@@ -43,7 +43,9 @@ def run_loop() -> None:
                     if movie:
                         movie.status = MovieStatus.PROCESSING
             if job:
-                with Session.begin() as session:
+                # Worker commits its own short database phases.  Do not wrap
+                # long ffsubsync/download work in a SQLite write transaction.
+                with Session() as session:
                     worker.process(session, job)
         except Exception: logging.exception("worker loop failed")
         time.sleep(config.worker_poll_seconds)

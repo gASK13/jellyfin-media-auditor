@@ -50,6 +50,8 @@ class SubtitlePipeline:
             subtitle.last_attempt_at = datetime.now(UTC).replace(tzinfo=None)
             return False
         subtitle.status = SubtitleStatus.SEARCHING; subtitle.last_attempt_at = datetime.now(UTC).replace(tzinfo=None)
+        # Do not own the SQLite writer while waiting for a provider search.
+        session.commit()
         result = self.client.search(language=language, imdb_id=movie.imdb_id, tmdb_id=movie.tmdb_id, filename=Path(movie.worker_path).stem)
         if not result:
             subtitle.status = SubtitleStatus.NOT_FOUND; subtitle.error_message = "No suitable OpenSubtitles result"; return False
@@ -60,6 +62,9 @@ class SubtitlePipeline:
             record_download(session)
             subtitle.status = SubtitleStatus.DOWNLOADED; subtitle.opensubtitles_file_id = str(result.candidate.file_id); subtitle.source = "OpenSubtitles"; subtitle.downloaded_at = datetime.now(UTC).replace(tzinfo=None)
             subtitle.status = SubtitleStatus.SYNCING
+            # Download accounting and state are durable.  ffsubsync can run
+            # for minutes, so it must not keep the queue writer locked.
+            session.commit()
             sync = self.synchronizer.synchronize(Path(movie.worker_path), downloaded_path, final_path)
             subtitle.path = str(sync.path); subtitle.status = SubtitleStatus.READY; subtitle.sync_status = "SYNCED"; subtitle.synced_at = datetime.now(UTC).replace(tzinfo=None); subtitle.error_message = None
             downloaded_path.unlink(missing_ok=True)

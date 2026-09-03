@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -40,9 +42,17 @@ def utcnow() -> datetime:
 
 
 def queue_movie(movie_id: int) -> tuple[int, bool]:
-    with Session.begin() as session:
-        job = enqueue(session, movie_id)
-        return job.id, job.status == JobStatus.PENDING
+    # A short retry protects the UI from a simultaneous scanner/worker commit.
+    for attempt in range(3):
+        try:
+            with Session.begin() as session:
+                job = enqueue(session, movie_id)
+                return job.id, job.status == JobStatus.PENDING
+        except OperationalError:
+            if attempt == 2:
+                raise
+            time.sleep(0.25 * (attempt + 1))
+    raise RuntimeError("Queue retry loop ended unexpectedly")
 
 
 def save_override(movie_id: int, stream_index: int, language: str, reason: str) -> None:
@@ -64,17 +74,25 @@ def delete_override(movie_id: int, stream_index: int) -> None:
 
 
 def subtitle_state(required: set[str], records: dict[str, Subtitle]) -> tuple[str, list[str]]:
-    missing, problems = [], []
+    missing, failed, not_found, searching = [], [], [], []
     for language in sorted(required):
         record = records.get(language)
         if record is None or record.status != SubtitleStatus.READY:
             missing.append(language.upper())
             if record and record.status in {SubtitleStatus.ERROR, SubtitleStatus.SYNC_FAILED}:
-                problems.append(language.upper())
-    if problems:
-        return f"⚠ Problem: {', '.join(problems)}", missing
+                failed.append(language.upper())
+            elif record and record.status == SubtitleStatus.NOT_FOUND:
+                not_found.append(language.upper())
+            elif record and record.status in {SubtitleStatus.SEARCHING, SubtitleStatus.DOWNLOADED, SubtitleStatus.SYNCING}:
+                searching.append(language.upper())
+    if failed:
+        return f"⚠ Failed: {', '.join(failed)}", missing
+    if not_found:
+        return f"⚠ No match: {', '.join(not_found)}", missing
+    if searching:
+        return f"↻ Working: {', '.join(searching)}", missing
     if missing:
-        return f"○ Missing: {', '.join(missing)}", missing
+        return f"○ Not checked: {', '.join(missing)}", missing
     return "✓ Ready", []
 
 
@@ -125,6 +143,7 @@ def show_movie_detail(movie_id: int) -> None:
                     "Source": record.source if record and record.source else ("embedded" if embedded_stream else "—"),
                     "Sync": record.sync_status if record and record.sync_status else ("EMBEDDED" if embedded_stream else "—"),
                     "Path / stream": record.path if record and record.path else (f"Embedded stream {embedded_stream.index}" if embedded_stream else "—"),
+                    "Detail": record.error_message if record and record.error_message else "—",
                 })
             st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
             st.caption("Subtitle automation is " + ("enabled" if config.subtitles_enabled else "disabled") + ". Embedded streams and usable sidecars satisfy a subtitle requirement.")
@@ -133,7 +152,11 @@ def show_movie_detail(movie_id: int) -> None:
         action_col, override_col = st.columns([1, 2])
         with action_col:
             if st.button("Queue reprocessing", type="primary", use_container_width=True):
-                job_id, queued = queue_movie(movie.id)
+                try:
+                    job_id, queued = queue_movie(movie.id)
+                except OperationalError:
+                    st.error("The queue is briefly busy. Please try again in a few seconds.")
+                    return
                 if queued:
                     st.session_state["queue_notice"] = f"Queued job {job_id} for {movie.title}."
                 else:
@@ -218,7 +241,7 @@ with Session() as session:
         st.info(f"**Queue health**\n\n{active_jobs} active job{'s' if active_jobs != 1 else ''}\n\nLast scan: {last_scan.strftime('%d %b %H:%M') if last_scan else 'never'}")
     with subtitle_col:
         if config.subtitles_enabled:
-            st.success(f"**Subtitle automation is ON**\n\nMissing: CZ {missing_czech} · EN {missing_english}\n\nProblems: {subtitle_problems}")
+            st.success(f"**Subtitle automation is ON**\n\nNeeds subtitles: CZ {missing_czech} · EN {missing_english}\n\nNo-match / failed: {subtitle_problems}")
         else:
             st.warning(f"**Subtitle automation is OFF**\n\nReady sidecars are shown below. Pending downloads: CZ {missing_czech} · EN {missing_english}.")
 
@@ -257,7 +280,7 @@ with Session() as session:
     if subtitle_filter:
         def subtitle_matches(row: dict) -> bool:
             state = row["Subtitles"]
-            return ("Ready" in subtitle_filter and state == "✓ Ready") or ("Missing" in subtitle_filter and state.startswith("○")) or ("Problem" in subtitle_filter and state.startswith("⚠"))
+            return ("Ready" in subtitle_filter and state == "✓ Ready") or ("Missing" in subtitle_filter and (state.startswith("○") or state.startswith("↻"))) or ("Problem" in subtitle_filter and state.startswith("⚠"))
         filtered = [row for row in filtered if subtitle_matches(row)]
     if library_filter:
         filtered = [row for row in filtered if row["Library"] in library_filter]

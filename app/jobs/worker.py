@@ -61,29 +61,47 @@ class Worker:
             log.warning("job=%s disappeared before processing", job_id)
             return
         movie=session.get(Movie, job.movie_id)
-        if not movie or not movie.active: finish(session, job); return
+        if not movie or not movie.active:
+            finish(session, job)
+            session.commit()
+            return
         movie.status=MovieStatus.PROCESSING
         try:
             self._audit_audio(session, movie)
             languages=[track.normalized_language for track in session.scalars(select(AudioTrack).where(AudioTrack.movie_id == movie.id))]
+            # Audio inspection may run Whisper.  Persist it before any remote
+            # calls so this connection no longer owns SQLite's writer lock.
+            session.commit()
             if any(lang is None for lang in languages): movie.status=MovieStatus.UNSURE
             else:
                 if self.jellyfin_client:
                     reconcile_movie_tags(self.jellyfin_client, movie_id=movie.jellyfin_item_id, languages=languages)
                 # Local sidecars and embedded streams are recorded even when downloads are disabled.
                 inspect_available_subtitles(session, movie, languages)
+                # ffprobe inspection is complete; release any subtitle writes
+                # before OpenSubtitles or ffsubsync can take a long time.
+                session.commit()
                 if self.config.subtitles_enabled:
                     if SubtitlePipeline(self.config).process_movie(session, movie, languages) and self.jellyfin_client:
                         self.jellyfin_client.refresh_item(movie.jellyfin_item_id)
                 movie.status=MovieStatus.PROCESSED; movie.last_processed_at=datetime.now(UTC).replace(tzinfo=None); movie.error_message=None
             finish(session, job)
+            session.commit()
         except FileNotFoundError:
+            session.rollback()
+            movie=session.get(Movie, job.movie_id)
+            job=session.get(Job, job.id)
             movie.status=MovieStatus.ERROR; movie.error_message="Media file is missing"; finish(session, job, movie.error_message)
+            session.commit()
         except Exception as exc:
+            session.rollback()
+            movie=session.get(Movie, job.movie_id)
+            job=session.get(Job, job.id)
             log.exception("job=%s movie=%s processing failed", job.id, movie.jellyfin_item_id)
             movie.status=MovieStatus.ERROR; movie.error_message=str(exc)
             delay=min(3600, 30 * (2 ** min(job.attempts, 6)))
             finish(session, job, str(exc), delay if job.attempts < self.config.max_attempts else None)
+            session.commit()
     def _audit_audio(self, session: Session, movie: Movie) -> None:
         path=Path(movie.worker_path)
         if not path.is_file(): raise FileNotFoundError(path)

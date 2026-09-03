@@ -21,7 +21,7 @@ def main() -> None:
     config = replace(load_config(), subtitles_enabled=True)
     Session = make_session_factory(config.db_path)
     client = JellyfinClient(config.jellyfin_url, config.jellyfin_api_key, config.jellyfin_user_id)
-    with Session.begin() as session:
+    with Session() as session:
         movie = session.scalar(select(Movie).where(Movie.jellyfin_item_id == args.item_id))
         if movie is None:
             item = client.get_item(args.item_id)
