@@ -40,6 +40,9 @@ class Config:
     scanner_interval_minutes: int = 60
     worker_poll_seconds: int = 5
     max_attempts: int = 5
+    scanner_failure_initial_seconds: int = 60
+    scanner_failure_max_seconds: int = 3600
+    job_stale_after_minutes: int = 180
     whisper_model: str = "base"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
@@ -91,7 +94,7 @@ def load_config(path: str | Path | None = None) -> Config:
         libraries=[Library(**library) for library in raw.get("libraries", [])],
         db_path=Path(raw.get("database", {}).get("path", "data/auditor.sqlite3")),
         scanner_interval_minutes=int(scanner.get("interval_minutes", 60)),
-        worker_poll_seconds=int(scanner.get("worker_poll_seconds", 5)), max_attempts=int(scanner.get("max_attempts", 5)),
+        worker_poll_seconds=int(scanner.get("worker_poll_seconds", 5)), max_attempts=int(scanner.get("max_attempts", 5)), scanner_failure_initial_seconds=int(scanner.get("failure_initial_seconds", 60)), scanner_failure_max_seconds=int(scanner.get("failure_max_seconds", 3600)), job_stale_after_minutes=int(scanner.get("job_stale_after_minutes", 180)),
         whisper_model=whisper.get("model", "base"), whisper_device=whisper.get("device", "cpu"),
         whisper_compute_type=whisper.get("compute_type", "int8"),
         confidence_threshold=float(audio.get("confidence_threshold", 0.75)),

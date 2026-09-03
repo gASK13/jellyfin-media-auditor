@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -12,19 +12,34 @@ from app.media.detector import FasterWhisperLanguageDetector
 from app.media.language import normalize_language, required_subtitle_languages
 from app.subtitles.files import find_local_subtitle
 from app.jellyfin.tags import reconcile_movie_tags
+from app.subtitles.pipeline import SubtitlePipeline
+from app.subtitles.inspection import inspect_available_subtitles
 
 log=logging.getLogger(__name__)
 
 
-def recover_orphaned_jobs(session: Session) -> int:
-    """Reset PROCESSING jobs left over from a crash/restart back to PENDING."""
-    result = session.execute(
-        update(Job).where(Job.status == JobStatus.PROCESSING).values(status=JobStatus.PENDING)
-    )
-    count = result.rowcount
-    if count:
-        log.warning("Recovered %d orphaned PROCESSING jobs back to PENDING", count)
-    return count
+def recover_stale_jobs(session: Session, stale_after_minutes: int, *, recover_all: bool = False) -> tuple[int, int]:
+    """Recover interrupted claims without reprocessing movies that already reached a terminal state."""
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=stale_after_minutes)
+    query = select(Job).where(Job.status == JobStatus.PROCESSING)
+    if not recover_all:
+        query = query.where(Job.started_at.is_not(None), Job.started_at < cutoff)
+    completed = pending = 0
+    for job in session.scalars(query):
+        movie = session.get(Movie, job.movie_id)
+        if movie and movie.status in {MovieStatus.PROCESSED, MovieStatus.UNSURE, MovieStatus.ERROR}:
+            job.status = JobStatus.COMPLETED
+            job.completed_at = datetime.now(UTC).replace(tzinfo=None)
+            job.error_message = "Recovered stale claim; movie already reached a terminal state"
+            completed += 1
+        else:
+            job.status = JobStatus.PENDING
+            job.started_at = None
+            job.error_message = "Recovered stale claim; queued for retry"
+            pending += 1
+    if completed or pending:
+        log.warning("Recovered stale jobs: %d completed, %d returned to pending", completed, pending)
+    return completed, pending
 
 class LanguageDetector:
     """Interface intentionally isolated so a faster-whisper implementation can be injected."""
@@ -36,6 +51,15 @@ class Worker:
         self.detector=detector or FasterWhisperLanguageDetector(config.whisper_model, config.whisper_device, config.whisper_compute_type, config.initial_sample_count, config.fallback_sample_count, config.sample_duration_seconds, config.confidence_threshold)
         self.jellyfin_client=jellyfin_client
     def process(self, session: Session, job: Job) -> None:
+        # The queue claim is deliberately committed before the potentially long
+        # media work starts.  Re-load the job in this transaction: the object
+        # handed to us by the claim transaction is detached, and mutating it
+        # would otherwise leave it stuck in PROCESSING forever.
+        job_id = job.id
+        job = session.get(Job, job_id)
+        if job is None:
+            log.warning("job=%s disappeared before processing", job_id)
+            return
         movie=session.get(Movie, job.movie_id)
         if not movie or not movie.active: finish(session, job); return
         movie.status=MovieStatus.PROCESSING
@@ -46,8 +70,11 @@ class Worker:
             else:
                 if self.jellyfin_client:
                     reconcile_movie_tags(self.jellyfin_client, movie_id=movie.jellyfin_item_id, languages=languages)
+                # Local sidecars and embedded streams are recorded even when downloads are disabled.
+                inspect_available_subtitles(session, movie, languages)
                 if self.config.subtitles_enabled:
-                    self._inspect_existing_subtitles(session, movie, languages)
+                    if SubtitlePipeline(self.config).process_movie(session, movie, languages) and self.jellyfin_client:
+                        self.jellyfin_client.refresh_item(movie.jellyfin_item_id)
                 movie.status=MovieStatus.PROCESSED; movie.last_processed_at=datetime.now(UTC).replace(tzinfo=None); movie.error_message=None
             finish(session, job)
         except FileNotFoundError:

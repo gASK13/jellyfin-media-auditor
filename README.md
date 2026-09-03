@@ -35,16 +35,16 @@ OPENSUBTITLES_PASSWORD=""
 
 ```yaml
 jellyfin:
-  url: "http://192.168.1.125:8096"
+  url: "http://192.168.1.2:1234"
   api_key: "${JELLYFIN_API_KEY}"
-  user_id: "0a5470ab5d4246ff835401fe14ffd609"
+  user_id: "{USER_ID}"
   webhook_token: "${JELLYFIN_WEBHOOK_TOKEN}"
 media:
   jellyfin_root: "/foxfin/movies"
   worker_root: "/foxfin/movies"
 libraries:
   - name: "Movies"
-    jellyfin_id: "f137a2dd21bbc1b99aa5c0f6bf02a805"
+    jellyfin_id: "{ID}"
 scanner:
   interval_minutes: 60
   worker_poll_seconds: 5
@@ -76,6 +76,12 @@ subtitles:
    ```bash
    AUDITOR_CONFIG=config.yaml .venv/bin/streamlit run ui/dashboard.py --server.address 0.0.0.0 --server.port 8501
    ```
+
+4. **Run one controlled subtitle test** (does not enable the global subtitle worker setting):
+   ```bash
+   AUDITOR_CONFIG=config.yaml .venv/bin/python -m app.subtitle_test --item-id <JELLYFIN_ITEM_ID>
+   ```
+   This command may download subtitles for only the specified movie. Verify the `.cs.srt` / `.en.srt` sidecars, Jellyfin refresh, and dashboard status before setting `subtitles.enabled: true`.
 
 ---
 

@@ -22,6 +22,11 @@ scanner:
   interval_minutes: 60
   worker_poll_seconds: 5
   max_attempts: 5
+  # Jellyfin scan failures back off from this duration up to failure_max_seconds.
+  failure_initial_seconds: 60
+  failure_max_seconds: 3600
+  # A claimed job older than this is recovered after a worker interruption.
+  job_stale_after_minutes: 180
 audio_detection:
   confidence_threshold: 0.75
   initial_sample_count: 3

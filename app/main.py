@@ -6,25 +6,42 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from app.config import load_config
 from app.db.database import make_session_factory
+from app.db.models import Movie, MovieStatus
 from app.jellyfin.client import JellyfinClient
 from app.jellyfin.scanner import reconcile, upsert_item
 from app.jobs.queue import claim_next
-from app.jobs.worker import Worker, recover_orphaned_jobs
+from app.jobs.worker import Worker, recover_stale_jobs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 config=load_config(); Session=make_session_factory(config.db_path); client=JellyfinClient(config.jellyfin_url, config.jellyfin_api_key, config.jellyfin_user_id)
 
 def run_loop() -> None:
-    worker=Worker(config, jellyfin_client=client); next_scan=0.0
+    worker=Worker(config, jellyfin_client=client)
+    next_scan=0.0
+    scan_failure_delay=config.scanner_failure_initial_seconds
     while True:
         try:
             if time.monotonic() >= next_scan:
-                with Session.begin() as session:
-                    reconcile(session, config, client)
-                next_scan=time.monotonic()+config.scanner_interval_minutes*60
+                # Advance the timer before scanning so a transient Jellyfin error cannot cause a five-second retry loop.
+                next_scan=time.monotonic()+scan_failure_delay
+                try:
+                    with Session.begin() as session:
+                        count=reconcile(session, config, client)
+                    logging.info("Jellyfin reconciliation completed: %d movies", count)
+                    scan_failure_delay=config.scanner_failure_initial_seconds
+                    next_scan=time.monotonic()+config.scanner_interval_minutes*60
+                except Exception:
+                    logging.exception("Jellyfin reconciliation failed; retrying in %s seconds", scan_failure_delay)
+                    scan_failure_delay=min(config.scanner_failure_max_seconds, scan_failure_delay * 2)
             job=None
             with Session.begin() as session:
+                recover_stale_jobs(session, config.job_stale_after_minutes)
                 job=claim_next(session)
+                if job:
+                    # Commit this visible state before a long Whisper/ffsubsync operation begins.
+                    movie = session.get(Movie, job.movie_id)
+                    if movie:
+                        movie.status = MovieStatus.PROCESSING
             if job:
                 with Session.begin() as session:
                     worker.process(session, job)
@@ -34,7 +51,7 @@ def run_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     with Session.begin() as session:
-        recover_orphaned_jobs(session)
+        recover_stale_jobs(session, config.job_stale_after_minutes, recover_all=True)
     threading.Thread(target=run_loop, daemon=True, name="auditor-worker").start(); yield
 
 app=FastAPI(title="jellyfin-media-auditor", lifespan=lifespan)
