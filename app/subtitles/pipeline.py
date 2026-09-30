@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Config
-from app.db.models import Movie, Subtitle, SubtitleStatus
+from app.db.models import Movie, Subtitle, SubtitleStatus, SubtitleWaiver
 from app.media.language import required_subtitle_languages
 from app.subtitles.files import final_subtitle_path, find_local_subtitle
 from app.subtitles.opensubtitles import OpenSubtitlesClient
@@ -24,7 +24,8 @@ class SubtitlePipeline:
 
     def process_movie(self, session: Session, movie: Movie, languages: list[str | None]) -> bool:
         changed = inspect_available_subtitles(session, movie, languages)
-        for language in required_subtitle_languages(languages):
+        waived = set(session.scalars(select(SubtitleWaiver.language).where(SubtitleWaiver.movie_id == movie.id)))
+        for language in required_subtitle_languages(languages) - waived:
             changed |= self._process_language(session, movie, language)
         return changed
 

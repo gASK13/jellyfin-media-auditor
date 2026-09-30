@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.config import load_config
 from app.db.database import make_session_factory
-from app.db.models import AudioTrack, Job, JobStatus, ManualOverride, Movie, MovieStatus, Subtitle, SubtitleStatus
+from app.db.models import AudioTrack, Job, JobStatus, ManualOverride, Movie, MovieStatus, Subtitle, SubtitleStatus, SubtitleWaiver
 from app.jobs.queue import enqueue
 from app.media.ffprobe import inspect_subtitle_streams
 from app.media.language import audio_tags, normalize_language, required_subtitle_languages
@@ -73,9 +73,26 @@ def delete_override(movie_id: int, stream_index: int) -> None:
             enqueue(session, movie_id)
 
 
-def subtitle_state(required: set[str], records: dict[str, Subtitle]) -> tuple[str, list[str]]:
+def save_subtitle_waiver(movie_id: int, language: str, reason: str) -> None:
+    with Session.begin() as session:
+        waiver = session.scalar(select(SubtitleWaiver).where(SubtitleWaiver.movie_id == movie_id, SubtitleWaiver.language == language))
+        if waiver:
+            waiver.reason = reason or None
+        else:
+            session.add(SubtitleWaiver(movie_id=movie_id, language=language, reason=reason or None))
+
+
+def delete_subtitle_waiver(movie_id: int, language: str) -> None:
+    with Session.begin() as session:
+        waiver = session.scalar(select(SubtitleWaiver).where(SubtitleWaiver.movie_id == movie_id, SubtitleWaiver.language == language))
+        if waiver:
+            session.delete(waiver)
+
+
+def subtitle_state(required: set[str], records: dict[str, Subtitle], waived: set[str] | None = None) -> tuple[str, list[str]]:
+    waived = waived or set()
     missing, failed, not_found, searching = [], [], [], []
-    for language in sorted(required):
+    for language in sorted(required - waived):
         record = records.get(language)
         if record is None or record.status != SubtitleStatus.READY:
             missing.append(language.upper())
@@ -93,7 +110,7 @@ def subtitle_state(required: set[str], records: dict[str, Subtitle]) -> tuple[st
         return f"↻ Working: {', '.join(searching)}", missing
     if missing:
         return f"○ Not checked: {', '.join(missing)}", missing
-    return "✓ Ready", []
+    return (f"✓ Exempt: {', '.join(language.upper() for language in sorted(waived))}" if waived else "✓ Ready"), []
 
 
 @st.dialog("Movie details", width="large")
@@ -105,6 +122,7 @@ def show_movie_detail(movie_id: int) -> None:
             return
         movie_tracks = list(session.scalars(select(AudioTrack).where(AudioTrack.movie_id == movie.id).order_by(AudioTrack.stream_index)))
         records = {subtitle.language: subtitle for subtitle in session.scalars(select(Subtitle).where(Subtitle.movie_id == movie.id))}
+        waivers = {waiver.language: waiver for waiver in session.scalars(select(SubtitleWaiver).where(SubtitleWaiver.movie_id == movie.id))}
         overrides = {override.audio_stream_index: override for override in session.scalars(select(ManualOverride).where(ManualOverride.movie_id == movie.id))}
         active_job = session.scalar(select(Job).where(Job.movie_id == movie.id, Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])).order_by(Job.id.desc()))
         languages = [track.normalized_language for track in movie_tracks]
@@ -134,38 +152,24 @@ def show_movie_detail(movie_id: int) -> None:
         with subtitle_col:
             st.markdown("#### Subtitles")
             detail_rows = []
-            for language in sorted(required | set(records)):
+            for language in sorted(required | set(records) | set(waivers)):
                 record = records.get(language)
+                waiver = waivers.get(language)
                 embedded_stream = embedded.get(language)
                 detail_rows.append({
-                    "Language": language.upper(), "Required": "Yes" if language in required else "No",
-                    "Status": record.status.value if record else ("EMBEDDED" if embedded_stream else "MISSING"),
-                    "Source": record.source if record and record.source else ("embedded" if embedded_stream else "—"),
+                    "Language": language.upper(), "Required": "Waived" if waiver else ("Yes" if language in required else "No"),
+                    "Status": "EXEMPT" if waiver else (record.status.value if record else ("EMBEDDED" if embedded_stream else "MISSING")),
+                    "Source": "manual exemption" if waiver else (record.source if record and record.source else ("embedded" if embedded_stream else "—")),
                     "Sync": record.sync_status if record and record.sync_status else ("EMBEDDED" if embedded_stream else "—"),
                     "Path / stream": record.path if record and record.path else (f"Embedded stream {embedded_stream.index}" if embedded_stream else "—"),
-                    "Detail": record.error_message if record and record.error_message else "—",
+                    "Detail": waiver.reason if waiver and waiver.reason else (record.error_message if record and record.error_message else "—"),
                 })
             st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
             st.caption("Subtitle automation is " + ("enabled" if config.subtitles_enabled else "disabled") + ". Embedded streams and usable sidecars satisfy a subtitle requirement.")
 
         st.divider()
-        action_col, override_col = st.columns([1, 2])
-        with action_col:
-            if st.button("Queue reprocessing", type="primary", use_container_width=True):
-                try:
-                    job_id, queued = queue_movie(movie.id)
-                except OperationalError:
-                    st.error("The queue is briefly busy. Please try again in a few seconds.")
-                    return
-                if queued:
-                    st.session_state["queue_notice"] = f"Queued job {job_id} for {movie.title}."
-                else:
-                    st.session_state["queue_notice"] = f"{movie.title} is already queued or processing (job {job_id})."
-                # Close this dialog and clear the button event, so the next
-                # title can be opened and queued without a stale modal state.
-                st.rerun()
-            st.caption("Existing audio detection is reused unless media or an override changed.")
-        with override_col:
+        audio_override_col, subtitle_override_col = st.columns(2)
+        with audio_override_col:
             st.markdown("##### Manual audio override")
             if movie_tracks:
                 stream_index = st.selectbox("Audio stream", [track.stream_index for track in movie_tracks], format_func=lambda value: f"Stream {value}", key=f"dialog-stream-{movie.id}")
@@ -180,11 +184,46 @@ def show_movie_detail(movie_id: int) -> None:
                 if current and st.button("Remove this override", key=f"dialog-remove-{movie.id}"):
                     delete_override(movie.id, stream_index)
                     st.success("Override removed and movie queued.")
+        with subtitle_override_col:
+            st.markdown("##### Subtitle exception")
+            missing_languages = sorted(language for language in required if language not in waivers and (language not in records or records[language].status != SubtitleStatus.READY))
+            if missing_languages:
+                with st.form(f"subtitle-waiver-{movie.id}"):
+                    waive_language = st.selectbox("Mark subtitle as not required", missing_languages, format_func=str.upper)
+                    waive_reason = st.text_input("Reason (optional)", placeholder="e.g. I do not want Czech subtitles for this movie")
+                    if st.form_submit_button("Mark as okay"):
+                        save_subtitle_waiver(movie.id, waive_language, waive_reason)
+                        st.session_state["subtitle_notice"] = f"{waive_language.upper()} subtitle marked as okay for {movie.title}."
+                        st.rerun()
+            if waivers:
+                waiver_language = st.selectbox("Restore subtitle requirement", sorted(waivers), format_func=str.upper, key=f"restore-waiver-{movie.id}")
+                if st.button("Require this subtitle again", key=f"restore-waiver-button-{movie.id}"):
+                    delete_subtitle_waiver(movie.id, waiver_language)
+                    st.session_state["subtitle_notice"] = f"{waiver_language.upper()} subtitle requirement restored for {movie.title}."
+                    st.rerun()
+            if not missing_languages and not waivers:
+                st.caption("All required subtitles are already available.")
+
+        st.divider()
+        if st.button("Queue reprocessing", type="primary", use_container_width=True):
+            try:
+                job_id, queued = queue_movie(movie.id)
+            except OperationalError:
+                st.error("The queue is briefly busy. Please try again in a few seconds.")
+                return
+            if queued:
+                st.session_state["queue_notice"] = f"Queued job {job_id} for {movie.title}."
+            else:
+                st.session_state["queue_notice"] = f"{movie.title} is already queued or processing (job {job_id})."
+            st.rerun()
+        st.caption("Existing audio detection is reused unless media or an override changed.")
 
 
 st.title("🎬 Jellyfin Media Auditor")
 st.caption("Audio tags, subtitle readiness, and processing health in one place.")
 if notice := st.session_state.pop("queue_notice", None):
+    st.toast(notice, icon="✅")
+if notice := st.session_state.pop("subtitle_notice", None):
     st.toast(notice, icon="✅")
 
 with Session() as session:
@@ -195,6 +234,9 @@ with Session() as session:
     subtitle_by_movie: dict[int, dict[str, Subtitle]] = defaultdict(dict)
     for subtitle in session.scalars(select(Subtitle)):
         subtitle_by_movie[subtitle.movie_id][subtitle.language] = subtitle
+    waivers_by_movie: dict[int, set[str]] = defaultdict(set)
+    for waiver in session.scalars(select(SubtitleWaiver)):
+        waivers_by_movie[waiver.movie_id].add(waiver.language)
     jobs_by_status = dict(session.execute(select(Job.status, func.count(Job.id)).group_by(Job.status)).all())
     active_jobs = {job.movie_id: job.status for job in session.scalars(select(Job).where(Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])).order_by(Job.id))}
 
@@ -204,7 +246,7 @@ with Session() as session:
         languages = [track.normalized_language for track in tracks_by_movie[movie.id]]
         tags = audio_tags(languages)
         required = required_subtitle_languages(languages) if movie.status == MovieStatus.PROCESSED else set()
-        subtitle_summary, missing = subtitle_state(required, subtitle_by_movie[movie.id]) if required else ("—", [])
+        subtitle_summary, missing = subtitle_state(required, subtitle_by_movie[movie.id], waivers_by_movie[movie.id]) if required else ("—", [])
         missing_czech += int("CS" in missing)
         missing_english += int("EN" in missing)
         subtitle_problems += int(subtitle_summary.startswith("⚠"))

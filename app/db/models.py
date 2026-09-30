@@ -35,6 +35,12 @@ class Subtitle(Base):
     id: Mapped[int] = mapped_column(primary_key=True); movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id"), index=True); language: Mapped[str] = mapped_column(String)
     path: Mapped[str | None] = mapped_column(Text, nullable=True); source: Mapped[str | None] = mapped_column(String, nullable=True); opensubtitles_file_id: Mapped[str | None] = mapped_column(String, nullable=True); status: Mapped[SubtitleStatus] = mapped_column(Enum(SubtitleStatus), default=SubtitleStatus.NOT_REQUIRED); sync_status: Mapped[str | None] = mapped_column(String, nullable=True); sync_score: Mapped[float | None] = mapped_column(Float, nullable=True); downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True); synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True); error_message: Mapped[str | None] = mapped_column(Text, nullable=True); last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+class SubtitleWaiver(Base):
+    """A deliberate exception to the normal subtitle-language policy."""
+    __tablename__="subtitle_waivers"; __table_args__=(UniqueConstraint("movie_id", "language"),)
+    id: Mapped[int] = mapped_column(primary_key=True); movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id"), index=True); language: Mapped[str] = mapped_column(String)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True); created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None)); updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None), onupdate=lambda: datetime.now(UTC).replace(tzinfo=None))
+
 class Job(Base):
     __tablename__="jobs"; __table_args__=(Index("ix_jobs_status_available", "status", "available_at"),)
     id: Mapped[int] = mapped_column(primary_key=True); movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id"), index=True); job_type: Mapped[str] = mapped_column(String); status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.PENDING, index=True); attempts: Mapped[int] = mapped_column(Integer, default=0); available_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None), index=True); started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True); completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True); error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
